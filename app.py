@@ -1,253 +1,240 @@
-import re
-import streamlit as st
+from __future__ import annotations
+
+import logging
+
+import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
 
-st.set_page_config(page_title="NBA Breakout Analysis", page_icon="🏀", layout="wide")
+from data import BANKS, load_data
 
-MULTI_TEAM_RE = re.compile(r"^(TOT|\d+TM)$")
+logging.basicConfig(level=logging.INFO)
 
-st.html("""
-<style>
-.st-key-score_slider [data-testid="stSliderThumbValue"],
-.st-key-score_slider [data-testid="stThumbValue"],
-.st-key-score_slider div[class*="StyledThumbValue"] {
-    opacity: 0;
-    transition: opacity 120ms ease;
+TRADING_DAYS = 252
+START_DATE = "2015-01-01"
+
+COLORS = {
+    "RY.TO": "#1F4E9C",
+    "TD.TO": "#205E3B",
+    "BNS.TO": "#E03131",
+    "BMO.TO": "#399BEB",
+    "CM.TO": "#8B0000",
 }
-.st-key-score_slider:hover [data-testid="stSliderThumbValue"],
-.st-key-score_slider:hover [data-testid="stThumbValue"],
-.st-key-score_slider:hover div[class*="StyledThumbValue"],
-.st-key-score_slider:focus-within [data-testid="stSliderThumbValue"],
-.st-key-score_slider:focus-within [data-testid="stThumbValue"],
-.st-key-score_slider:focus-within div[class*="StyledThumbValue"] {
-    opacity: 1;
-}
-.st-key-score_slider [data-testid="stSliderTickBarMin"],
-.st-key-score_slider [data-testid="stSliderTickBarMax"],
-.st-key-score_slider [data-testid="stTickBarMin"],
-.st-key-score_slider [data-testid="stTickBarMax"] {
-    font-size: 0 !important;
-}
-.st-key-score_slider [data-testid="stSliderTickBarMin"]::after,
-.st-key-score_slider [data-testid="stTickBarMin"]::after {
-    content: "Min";
-    font-size: 0.75rem;
-}
-.st-key-score_slider [data-testid="stSliderTickBarMax"]::after,
-.st-key-score_slider [data-testid="stTickBarMax"]::after {
-    content: "Max";
-    font-size: 0.75rem;
-}
-.leaderboard-wrap {
-    max-height: 620px;
-    overflow: auto;
-    border: 1px solid rgba(128, 128, 128, 0.3);
-    border-radius: 8px;
-}
-.leaderboard-wrap table {
-    border-collapse: collapse;
-    width: 100%;
-    font-size: 0.85rem;
-    font-variant-numeric: tabular-nums;
-}
-.leaderboard-wrap thead th {
-    position: sticky;
-    top: 0;
-    background: var(--secondary-background-color, #f0f2f6);
-    color: inherit;
-    text-align: right;
-    padding: 8px 10px;
-    border-bottom: 1px solid rgba(128, 128, 128, 0.35);
-    white-space: nowrap;
-    z-index: 2;
-}
-.leaderboard-wrap tbody td {
-    padding: 6px 10px;
-    text-align: right;
-    border-bottom: 1px solid rgba(128, 128, 128, 0.15);
-    white-space: nowrap;
-}
-.leaderboard-wrap tbody td:nth-child(1),
-.leaderboard-wrap thead th:nth-child(1) {
-    text-align: left;
-}
-.leaderboard-wrap tbody tr:hover td {
-    background: rgba(128, 128, 128, 0.08);
-}
-.leaderboard-wrap td[title] {
-    cursor: help;
-    text-decoration: underline dotted currentColor;
-    text-underline-offset: 3px;
-}
-</style>
-""")
 
-st.markdown("""
-    <h1 style='text-align: center;'>NBA Breakout Player Detection</h1>
-    <p style='text-align: center; color: gray; font-size: 1.1rem;'>2024 → 2025 Season Comparison</p>
-    <hr>
-""", unsafe_allow_html=True)
+STATIC = {"staticPlot": True, "displayModeBar": False}
+
+st.set_page_config(
+    page_title="Big Five Canadian Banks",
+    page_icon="🍁",
+    layout="wide",
+)
 
 
-@st.cache_data
-def load_data():
-    return pd.read_csv("breakouts_2024_to_2025.csv")
+@st.cache_data(ttl=60 * 60 * 6, show_spinner="Fetching bank data…")
+def get_data(start: str):
+    return load_data(start)
 
 
-df = load_data()
+def annualise_return(series: pd.Series) -> float:
+    years = len(series) / TRADING_DAYS
+    if years <= 0:
+        return np.nan
+    return (series.iloc[-1] / series.iloc[0]) ** (1 / years) - 1
 
-st.sidebar.header("Filters")
 
-positions = ["All"] + sorted(df["Pos"].dropna().unique().tolist())
-selected_pos = st.sidebar.selectbox("Position", positions)
+def pct(value: float, places: int = 1) -> str:
+    return "n/a" if not np.isfinite(value) else f"{value * 100:.{places}f}%"
 
-teams = ["All"] + sorted(df["Team"].dropna().unique().tolist())
-selected_team = st.sidebar.selectbox("Team", teams)
 
-min_score, max_score = float(df["Breakout Score"].min()), float(df["Breakout Score"].max())
+selected = list(BANKS)
 
-with st.sidebar.container(key="score_slider"):
-    score_range = st.slider(
-        "Breakout Score Range",
-        min_value=min_score,
-        max_value=max_score,
-        value=(min_score, max_score),
-        step=0.1,
-        format="%.1f",
+st.title("Big Five Canadian Banks Analysis")
+st.write(
+    "Compares RBC, TD, Scotiabank, BMO, and CIBC on long-run returns, volatility, and dividend income."
+)
+
+prices_all, yields, source = get_data(START_DATE)
+prices = prices_all[selected]
+rets = prices.pct_change().dropna()
+labels = {t: BANKS[t] for t in selected}
+
+if source != "yfinance":
+    st.warning(
+        "Live market data was unavailable, so every figure below comes from a "
+        "simulated price series. Treat it as illustrative, not factual.",
+        icon="⚠️",
     )
 
-top_n = st.sidebar.slider("Show Top N Players", min_value=5, max_value=len(df), value=50, step=5)
+missing_yields = [labels[t] for t in selected if not np.isfinite(yields.get(t, np.nan))]
+if missing_yields:
+    st.info(
+        "Dividend history could not be retrieved for: "
+        + ", ".join(missing_yields)
+        + ". These are omitted from the yield chart rather than shown as zero."
+    )
 
-filtered = df.copy()
-if selected_pos != "All":
-    filtered = filtered[filtered["Pos"] == selected_pos]
-if selected_team != "All":
-    filtered = filtered[filtered["Team"] == selected_team]
-filtered = filtered[
-    (filtered["Breakout Score"] >= score_range[0]) &
-    (filtered["Breakout Score"] <= score_range[1])
-]
-filtered = filtered.head(top_n).reset_index(drop=True)
+st.caption(
+    f"Source: {source}. Period: {prices.index[0].date()} to {prices.index[-1].date()} "
+    f"({len(prices):,} trading days)."
+)
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Players Shown", len(filtered))
-col2.metric("Top Breakout Score", f"{filtered['Breakout Score'].max():.1f}" if not filtered.empty else "—")
-col3.metric("Avg Breakout Score", f"{filtered['Breakout Score'].mean():.2f}" if not filtered.empty else "—")
+summary = pd.DataFrame({
+    "Total Return": prices.iloc[-1] / prices.iloc[0] - 1,
+    "Ann. Return": {t: annualise_return(prices[t]) for t in selected},
+    "Ann. Volatility": rets.std() * np.sqrt(TRADING_DAYS),
+    "Dividend Yield": pd.Series({t: yields.get(t, np.nan) for t in selected}),
+})
 
-st.markdown("### 📊 Breakout Leaderboard")
-st.caption("Team cells marked 2TM or 3TM are underlined. Hover one to see the teams in the order the player joined them.")
+best = summary["Total Return"].idxmax()
+c1, c2, c3 = st.columns(3)
+c1.metric("Best total return", labels[best],
+          pct(summary.loc[best, "Total Return"], 0))
 
-delta_cols = ["MPG Δ", "PPG Δ", "APG Δ", "RPG Δ", "SPG Δ", "FT% Δ", "FG% Δ", "3P% Δ"]
-present_delta_cols = [c for c in delta_cols if c in filtered.columns]
-
-
-def style_table(row):
-    styles = [""] * len(row)
-    idx = row.index.tolist()
-    if "Breakout Score" in idx:
-        val = row["Breakout Score"]
-        i = idx.index("Breakout Score")
-        if val > 3:
-            styles[i] = "background-color: #1a7a3a; color: white; font-weight: bold;"
-        elif val > 1:
-            styles[i] = "background-color: #a07800; color: white; font-weight: bold;"
-        elif val < 0:
-            styles[i] = "background-color: #8b1a1a; color: white; font-weight: bold;"
-        else:
-            styles[i] = "background-color: #2a5a2a; color: white; font-weight: bold;"
-    for col in present_delta_cols:
-        if col in idx:
-            val = row[col]
-            i = idx.index(col)
-            try:
-                if val > 0:
-                    styles[i] = "color: #4caf50;"
-                elif val < 0:
-                    styles[i] = "color: #f44336;"
-            except TypeError:
-                pass
-    return styles
-
-
-def split_teams(value):
-    if pd.isna(value):
-        return []
-    return [t.strip() for t in str(value).replace("→", ",").split(",") if t.strip()]
-
-
-def build_tooltips(display_df, source_df):
-    ttips = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
-    if "Team" not in display_df.columns or "Teams" not in source_df.columns:
-        return ttips
-    for i in display_df.index:
-        code = str(display_df.at[i, "Team"]).strip().upper()
-        if not MULTI_TEAM_RE.match(code):
-            continue
-        seq = split_teams(source_df.at[i, "Teams"])
-        if len(seq) > 1:
-            ttips.at[i, "Team"] = "Joined in order: " + " → ".join(seq)
-    return ttips
-
-
-display = filtered.drop(columns=["Teams"], errors="ignore")
-
-fmt = {col: "{:+.1f}" for col in present_delta_cols}
-fmt["Breakout Score"] = "{:.1f}"
-
-if display.empty:
-    st.info("No players match the current filters.")
+if summary["Dividend Yield"].notna().any():
+    top_yield = summary["Dividend Yield"].idxmax()
+    c2.metric("Highest dividend yield", labels[top_yield],
+              pct(summary.loc[top_yield, "Dividend Yield"]))
 else:
-    ttips = build_tooltips(display, filtered)
+    c2.metric("Highest dividend yield", "n/a", "no data")
 
-    styled = (
-        display.style
-        .apply(style_table, axis=1)
-        .format(fmt, na_rep="—")
-        .set_tooltips(ttips, as_title_attribute=True)
-        .hide(axis="index")
+c3.metric("Avg. pairwise correlation",
+          f"{rets.corr().where(~np.eye(len(selected), dtype=bool)).stack().mean():.2f}")
+
+st.divider()
+
+left, right = st.columns(2)
+
+with left:
+    st.subheader("Investment Growth")
+    growth = prices / prices.iloc[0]
+    fig = go.Figure()
+
+    for t in selected:
+        fig.add_trace(
+            go.Scatter(
+                x=growth.index,
+                y=growth[t],
+                name=labels[t],
+                line=dict(color=COLORS[t], width=2),
+            )
+        )
+
+    fig.update_layout(
+        yaxis_title="Value (start = $1)",
+        margin=dict(l=10, r=10, t=10, b=10),
+        legend_title_text="",
+        height=380,
     )
 
-    st.html(f'<div class="leaderboard-wrap">{styled.to_html()}</div>')
+    st.plotly_chart(fig, config=STATIC, width="stretch")
 
-    with st.expander("Sortable view"):
-        st.dataframe(display, use_container_width=True, hide_index=True)
+    basis = (
+        "Closes are dividend adjusted, so this is total shareholder return."
+        if source == "yfinance"
+        else "Simulated prices exclude dividends, so this is price return only."
+    )
+    st.caption(
+        "Tracks the cumulative growth of a $1 investment since 2015, allowing "
+        "comparison of long-term shareholder returns across Canada's Big Five banks. "
+        + basis
+    )
 
-st.markdown("### 📈 Breakout Score Chart")
-st.markdown("""
-> Each bar represents a player's **Breakout Score**, a composite metric that measures 
-> how much a player improved from the 2024 season to the 2025 season. The score is calculated using a weighted 
-> formula that factors in Points per 36 minutes (55%), True Shooting % (30%), Assists per 36 minutes (10%), 
-> and Turnovers per 36 minutes (5%). A **higher score means a stronger breakout season**. Players with a score 
-> above 3 are considered standout breakouts, while negative scores indicate a statistical decline.
-""")
+with right:
+    st.subheader("Risk vs Return (Annualized)")
+    fig = go.Figure()
 
-chart_data = filtered.sort_values("Breakout Score", ascending=True)
+    for t in selected:
+        fig.add_trace(
+            go.Scatter(
+                x=[summary.loc[t, "Ann. Volatility"] * 100],
+                y=[summary.loc[t, "Ann. Return"] * 100],
+                mode="markers+text",
+                name=labels[t],
+                text=[labels[t]],
+                textposition="top center",
+                marker=dict(size=16, color=COLORS[t]),
+                showlegend=False,
+            )
+        )
 
-hover_team = [
-    " → ".join(split_teams(t)) if MULTI_TEAM_RE.match(str(c).strip().upper()) else str(c)
-    for c, t in zip(chart_data.get("Team", []), chart_data.get("Teams", chart_data.get("Team", [])))
-]
+    fig.update_layout(
+        xaxis_title="Volatility (%)",
+        yaxis_title="Return (%)",
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=380,
+    )
 
-fig = go.Figure(go.Bar(
-    x=chart_data["Player"],
-    y=chart_data["Breakout Score"],
-    marker_color="#4c9be8",
-    customdata=hover_team,
-    hovertemplate="<b>%{x}</b><br>%{customdata}<br>Score: %{y:.1f}<extra></extra>",
-))
+    st.plotly_chart(fig, config=STATIC, width="stretch")
 
-fig.update_layout(
-    xaxis_tickangle=-45,
-    xaxis_title=None,
-    yaxis_title="Breakout Score",
-    dragmode=False,
-    height=500,
-    margin=dict(t=20, b=120),
-)
+    st.caption(
+        "Evaluates each bank's risk-return profile using annualized volatility and returns. "
+        "Higher returns with lower volatility indicate stronger performance."
+    )
 
-fig.update_layout(
-    modebar_remove=["zoom", "pan", "select", "lasso2d", "zoomIn2d", "zoomOut2d", "autoScale2d", "resetScale2d"]
-)
+left2, right2 = st.columns(2)
 
-st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": False, "displayModeBar": False})
+with left2:
+    st.subheader("Trailing Dividend Yield")
+
+    have_yield = [t for t in selected if np.isfinite(yields.get(t, np.nan))]
+
+    if have_yield:
+        yvals = [yields[t] * 100 for t in have_yield]
+
+        fig = go.Figure(
+            go.Bar(
+                x=[labels[t] for t in have_yield],
+                y=yvals,
+                marker_color=[COLORS[t] for t in have_yield],
+                text=[f"{v:.1f}%" for v in yvals],
+                textposition="outside",
+            )
+        )
+
+        fig.update_layout(
+            yaxis_title="Yield (%)",
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=360,
+        )
+
+        st.plotly_chart(fig, config=STATIC, width="stretch")
+    else:
+        st.error("No dividend data available for any ticker.")
+
+    st.caption(
+        "Compares trailing dividend yields to assess the income potential offered "
+        "by each bank's stock."
+    )
+
+with right2:
+    st.subheader("Daily Return Correlation")
+
+    corr = rets.corr()
+    short = [labels[t].split("(")[0].strip() for t in corr.columns]
+
+    fig = px.imshow(
+        corr.values,
+        x=short,
+        y=short,
+        color_continuous_scale="YlGnBu",
+        zmin=corr.values.min(),
+        zmax=1,
+        text_auto=".2f",
+        aspect="auto",
+    )
+
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=360,
+    )
+
+    st.plotly_chart(fig, config=STATIC, width="stretch")
+
+    st.caption(
+        "Shows the relationship between daily stock returns. High correlations "
+        "suggest the banks tend to react similarly to market conditions."
+    )
+
+st.divider()
