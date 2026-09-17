@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import datetime as dt
+import logging
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,10 @@ import streamlit as st
 
 from data import BANKS, load_data
 
+logging.basicConfig(level=logging.INFO)
+
 TRADING_DAYS = 252
+START_DATE = "2015-01-01"
 
 COLORS = {
     "RY.TO": "#1F4E9C",
@@ -30,8 +33,8 @@ st.set_page_config(
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner="Fetching bank data…")
-def get_data(start: str, end: str):
-    return load_data(start, end)
+def get_data(start: str):
+    return load_data(start)
 
 
 def annualise_return(series: pd.Series) -> float:
@@ -41,34 +44,61 @@ def annualise_return(series: pd.Series) -> float:
     return (series.iloc[-1] / series.iloc[0]) ** (1 / years) - 1
 
 
+def pct(value: float, places: int = 1) -> str:
+    return "n/a" if not np.isfinite(value) else f"{value * 100:.{places}f}%"
+
+
 selected = list(BANKS)
-start_date = "2015-01-01"
-end_date = dt.date.today().isoformat()
 
 st.title("Big Five Canadian Banks Analysis")
 st.write(
     "Compares RBC, TD, Scotiabank, BMO, and CIBC on long-run returns, volatility, and dividend income."
 )
 
-prices_all, yields, source = get_data(start_date, end_date)
+prices_all, yields, source = get_data(START_DATE)
 prices = prices_all[selected]
 rets = prices.pct_change().dropna()
 labels = {t: BANKS[t] for t in selected}
+
+if source != "yfinance":
+    st.warning(
+        "Live market data was unavailable, so every figure below comes from a "
+        "simulated price series. Treat it as illustrative, not factual.",
+        icon="⚠️",
+    )
+
+missing_yields = [labels[t] for t in selected if not np.isfinite(yields.get(t, np.nan))]
+if missing_yields:
+    st.info(
+        "Dividend history could not be retrieved for: "
+        + ", ".join(missing_yields)
+        + ". These are omitted from the yield chart rather than shown as zero."
+    )
+
+st.caption(
+    f"Source: {source}. Period: {prices.index[0].date()} to {prices.index[-1].date()} "
+    f"({len(prices):,} trading days)."
+)
 
 summary = pd.DataFrame({
     "Total Return": prices.iloc[-1] / prices.iloc[0] - 1,
     "Ann. Return": {t: annualise_return(prices[t]) for t in selected},
     "Ann. Volatility": rets.std() * np.sqrt(TRADING_DAYS),
-    "Dividend Yield": pd.Series({t: yields[t] for t in selected}),
+    "Dividend Yield": pd.Series({t: yields.get(t, np.nan) for t in selected}),
 })
 
 best = summary["Total Return"].idxmax()
 c1, c2, c3 = st.columns(3)
 c1.metric("Best total return", labels[best],
-          f"{summary.loc[best, 'Total Return'] * 100:.0f}%")
-c2.metric("Highest dividend yield",
-          labels[summary["Dividend Yield"].idxmax()],
-          f"{summary['Dividend Yield'].max() * 100:.1f}%")
+          pct(summary.loc[best, "Total Return"], 0))
+
+if summary["Dividend Yield"].notna().any():
+    top_yield = summary["Dividend Yield"].idxmax()
+    c2.metric("Highest dividend yield", labels[top_yield],
+              pct(summary.loc[top_yield, "Dividend Yield"]))
+else:
+    c2.metric("Highest dividend yield", "n/a", "no data")
+
 c3.metric("Avg. pairwise correlation",
           f"{rets.corr().where(~np.eye(len(selected), dtype=bool)).stack().mean():.2f}")
 
@@ -100,8 +130,15 @@ with left:
 
     st.plotly_chart(fig, config=STATIC, width="stretch")
 
+    basis = (
+        "Closes are dividend adjusted, so this is total shareholder return."
+        if source == "yfinance"
+        else "Simulated prices exclude dividends, so this is price return only."
+    )
     st.caption(
-        "Tracks the cumulative growth of a $1 investment since 2015, allowing comparison of long-term shareholder returns across Canada's Big Five banks."
+        "Tracks the cumulative growth of a $1 investment since 2015, allowing "
+        "comparison of long-term shareholder returns across Canada's Big Five banks. "
+        + basis
     )
 
 with right:
@@ -132,7 +169,8 @@ with right:
     st.plotly_chart(fig, config=STATIC, width="stretch")
 
     st.caption(
-        "Evaluates each bank's risk-return profile using annualized volatility and returns. Higher returns with lower volatility indicate stronger performance."
+        "Evaluates each bank's risk-return profile using annualized volatility and returns. "
+        "Higher returns with lower volatility indicate stronger performance."
     )
 
 left2, right2 = st.columns(2)
@@ -140,28 +178,34 @@ left2, right2 = st.columns(2)
 with left2:
     st.subheader("Trailing Dividend Yield")
 
-    yvals = [yields[t] * 100 for t in selected]
+    have_yield = [t for t in selected if np.isfinite(yields.get(t, np.nan))]
 
-    fig = go.Figure(
-        go.Bar(
-            x=[labels[t] for t in selected],
-            y=yvals,
-            marker_color=[COLORS[t] for t in selected],
-            text=[f"{v:.1f}%" for v in yvals],
-            textposition="outside",
+    if have_yield:
+        yvals = [yields[t] * 100 for t in have_yield]
+
+        fig = go.Figure(
+            go.Bar(
+                x=[labels[t] for t in have_yield],
+                y=yvals,
+                marker_color=[COLORS[t] for t in have_yield],
+                text=[f"{v:.1f}%" for v in yvals],
+                textposition="outside",
+            )
         )
-    )
 
-    fig.update_layout(
-        yaxis_title="Yield (%)",
-        margin=dict(l=10, r=10, t=10, b=10),
-        height=360,
-    )
+        fig.update_layout(
+            yaxis_title="Yield (%)",
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=360,
+        )
 
-    st.plotly_chart(fig, config=STATIC, width="stretch")
+        st.plotly_chart(fig, config=STATIC, width="stretch")
+    else:
+        st.error("No dividend data available for any ticker.")
 
     st.caption(
-        "Compares trailing dividend yields to assess the income potential offered by each bank's stock."
+        "Compares trailing dividend yields to assess the income potential offered "
+        "by each bank's stock."
     )
 
 with right2:
@@ -189,7 +233,8 @@ with right2:
     st.plotly_chart(fig, config=STATIC, width="stretch")
 
     st.caption(
-        "Shows the relationship between daily stock returns. High correlations suggest the banks tend to react similarly to market conditions."
+        "Shows the relationship between daily stock returns. High correlations "
+        "suggest the banks tend to react similarly to market conditions."
     )
 
 st.divider()
